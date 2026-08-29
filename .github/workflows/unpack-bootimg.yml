@@ -1,0 +1,67 @@
+name: 解包 boot.img 提取 vmlinux 符号表
+
+on:
+  workflow_dispatch:
+
+jobs:
+  unpack:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 下载仓库代码
+        uses: actions/checkout@v4
+
+      - name: 安装工具
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y lz4 zstd gzip p7zip-full binutils-aarch64-linux-gnu
+          # 安装 magiskboot
+          wget -q "https://github.com/topjohnwu/Magisk/releases/download/v27.0/Magisk-v27.0.apk" -O magisk.zip
+          unzip -j magisk.zip "lib/arm64-v8a/libmagiskboot.so" -d /tmp/
+          sudo install /tmp/libmagiskboot.so /usr/local/bin/magiskboot
+          # 安装 extract-vmlinux
+          sudo wget -q https://raw.githubusercontent.com/torvalds/linux/master/scripts/extract-vmlinux -O /usr/local/bin/extract-vmlinux
+          sudo chmod +x /usr/local/bin/extract-vmlinux
+
+      - name: 解包 boot.img
+        run: |
+          mkdir -p output
+          magiskboot unpack -h boot.img
+          ls -la
+
+      - name: 提取 vmlinux
+        run: |
+          extract-vmlinux kernel > output/vmlinux || true
+          # 如果上面的失败了，尝试手动解压
+          if [ ! -s output/vmlinux ]; then
+            file kernel
+            # 尝试各种压缩格式
+            zcat kernel > output/vmlinux 2>/dev/null || \
+            lz4 -d kernel output/vmlinux 2>/dev/null || \
+            zstd -d kernel -o output/vmlinux 2>/dev/null || \
+            cp kernel output/vmlinux
+          fi
+          file output/vmlinux
+
+      - name: 提取符号表
+        run: |
+          cd output
+          # 完整符号表（按地址排序）
+          aarch64-linux-gnu-nm -n vmlinux > symbols_all.txt 2>/dev/null || nm -n vmlinux > symbols_all.txt
+          # 仅函数符号
+          aarch64-linux-gnu-nm -n vmlinux | awk '$2 ~ /^[Tt]$/ {print $1, $3}' > functions.txt
+          # 详细 ELF 符号信息
+          aarch64-linux-gnu-readelf -s vmlinux > symbols_detail.txt 2>/dev/null || readelf -s vmlinux > symbols_detail.txt
+          # ELF 段信息
+          readelf -S vmlinux > sections.txt
+          # 统计
+          echo "=== 符号数量统计 ==="
+          wc -l symbols_all.txt functions.txt
+
+      - name: 上传结果
+        uses: actions/upload-artifact@v4
+        with:
+          name: vmlinux-and-symbols
+          path: |
+            output/vmlinux
+            output/*.txt
+          retention-days: 30
